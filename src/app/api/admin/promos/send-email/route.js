@@ -5,9 +5,10 @@
  * to SMTP via nodemailer. Resend is free for up to 3,000 emails/month with
  * proper DKIM/SPF deliverability — no Gmail limits or spam issues.
  *
- * Required env vars (pick one):
+ * Required env vars (pick one or more — tried in order):
  *   Option A (recommended): RESEND_API_KEY
- *   Option B (fallback):    SMTP_HOST, SMTP_USER, SMTP_PASS
+ *   Option B:               BREVO_API_KEY
+ *   Option C (fallback):    SMTP_HOST, SMTP_USER, SMTP_PASS
  */
 import { NextResponse } from 'next/server';
 import admin from 'firebase-admin';
@@ -101,30 +102,79 @@ const sendViaResend = async (to, subject, html) => {
 };
 
 /**
- * Sends a single email. Tries Resend first, falls back to SMTP on failure.
- * If neither is configured, throws.
+ * Sends via Brevo (formerly Sendinblue) transactional email API.
+ * Free tier: 300 emails/day. No npm dependency needed — uses fetch.
+ * Throws on failure.
+ */
+const sendViaBrevo = async (to, subject, html) => {
+  const brevoKey = process.env.BREVO_API_KEY;
+  if (!brevoKey) throw new Error('BREVO_API_KEY not set.');
+
+  const senderEmail = process.env.BREVO_FROM_EMAIL || 'noreply@iyk-hub.vercel.app';
+  const senderName = process.env.BREVO_FROM_NAME || 'Iyk Hub';
+
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'content-type': 'application/json',
+      'api-key': brevoKey,
+    },
+    body: JSON.stringify({
+      sender: { name: senderName, email: senderEmail },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody.message || `Brevo API error ${res.status}`);
+  }
+  return 'brevo';
+};
+
+/**
+ * Sends a single email. Tries providers in order: Resend → Brevo → SMTP.
+ * Falls back to the next provider on failure. Throws if all fail.
  */
 const sendEmail = async (to, subject, html, fromEmail) => {
   const hasResend = !!process.env.RESEND_API_KEY;
+  const hasBrevo = !!process.env.BREVO_API_KEY;
   const hasSMTP = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+
+  let lastError = null;
 
   if (hasResend) {
     try {
       return await sendViaResend(to, subject, html);
-    } catch (resendErr) {
-      console.warn(`Resend failed for ${to}: ${resendErr.message} — trying SMTP fallback`);
-      if (hasSMTP) {
-        return await sendViaSMTP(to, subject, html, fromEmail);
-      }
-      throw resendErr;
+    } catch (err) {
+      console.warn(`Resend failed for ${to}: ${err.message} — trying next provider`);
+      lastError = err;
+    }
+  }
+
+  if (hasBrevo) {
+    try {
+      return await sendViaBrevo(to, subject, html);
+    } catch (err) {
+      console.warn(`Brevo failed for ${to}: ${err.message} — trying next provider`);
+      lastError = err;
     }
   }
 
   if (hasSMTP) {
-    return await sendViaSMTP(to, subject, html, fromEmail);
+    try {
+      return await sendViaSMTP(to, subject, html, fromEmail);
+    } catch (err) {
+      console.warn(`SMTP failed for ${to}: ${err.message}`);
+      lastError = err;
+    }
   }
 
-  throw new Error('No email provider configured. Set RESEND_API_KEY or SMTP_HOST/SMTP_USER/SMTP_PASS.');
+  if (lastError) throw lastError;
+  throw new Error('No email provider configured. Set RESEND_API_KEY, BREVO_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS.');
 };
 
 export async function POST(request) {
@@ -144,10 +194,10 @@ export async function POST(request) {
     }
 
     // Check that at least one email provider is configured
-    if (!process.env.RESEND_API_KEY && !(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)) {
+    if (!process.env.RESEND_API_KEY && !process.env.BREVO_API_KEY && !(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)) {
       return NextResponse.json({
-        error: 'Email not configured. Set RESEND_API_KEY (recommended) or SMTP_HOST + SMTP_USER + SMTP_PASS.',
-        hint: 'Sign up free at https://resend.com — 3,000 emails/month, no spam issues.',
+        error: 'Email not configured. Set RESEND_API_KEY, BREVO_API_KEY, or SMTP_HOST + SMTP_USER + SMTP_PASS.',
+        hint: 'Sign up free at https://resend.com (3K/month) or https://brevo.com (300/day).',
       }, { status: 503 });
     }
 

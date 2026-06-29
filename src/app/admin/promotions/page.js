@@ -407,7 +407,8 @@ function SendEmailTab({ user, toast, codes, loading, setLoading, onDone }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.hint || 'Failed to send emails');
-      const providerLabel = data.provider === 'resend' ? ' via Resend' : data.provider === 'smtp' ? ' via SMTP' : '';
+      const providerLabels = { resend: ' via Resend', brevo: ' via Brevo', smtp: ' via SMTP' };
+      const providerLabel = providerLabels[data.provider] || '';
       let msg = `Sent to ${data.sentCount} user${data.sentCount !== 1 ? 's' : ''}${providerLabel}`;
       if (data.failedCount) {
         const failReasons = (data.errors || []).map((e) => e.error).filter(Boolean).join('; ');
